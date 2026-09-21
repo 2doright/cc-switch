@@ -1,8 +1,24 @@
 import { act, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
+import { http, HttpResponse } from "msw";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { DeepLinkImportDialog } from "@/components/DeepLinkImportDialog";
+import type { DeepLinkImportRequest } from "@/lib/api/deeplink";
 import { emitTauriEvent } from "../msw/tauriMocks";
+import { server } from "../msw/server";
+
+const TAURI_ENDPOINT = "http://tauri.local";
+
+const queuePendingDeeplink = (request: DeepLinkImportRequest) => {
+  let pending: DeepLinkImportRequest | null = request;
+  server.use(
+    http.post(`${TAURI_ENDPOINT}/take_pending_deeplink`, () => {
+      const current = pending;
+      pending = null;
+      return HttpResponse.json(current);
+    }),
+  );
+};
 
 vi.mock("@/components/ui/dialog", () => ({
   Dialog: ({ children }: { children: React.ReactNode }) => (
@@ -32,26 +48,45 @@ const Wrapper = ({ children }: { children: React.ReactNode }) => (
 );
 
 describe("DeepLinkImportDialog", () => {
+  it("recovers a deep link that arrived before the frontend listener mounted", async () => {
+    queuePendingDeeplink({
+      version: "v1",
+      resource: "provider",
+      app: "claude",
+      name: "Pending Provider",
+      endpoint: "https://api.example.com",
+      apiKey: "sk-pending-key",
+    });
+
+    render(<DeepLinkImportDialog />, { wrapper: Wrapper });
+
+    await waitFor(() => {
+      expect(screen.getByText("Pending Provider")).toBeInTheDocument();
+    });
+  });
+
   it("renders masked usage access token and user id for provider imports", async () => {
+    const request: DeepLinkImportRequest = {
+      version: "v1",
+      resource: "provider",
+      app: "claude",
+      name: "Test Provider",
+      homepage: "https://example.com",
+      endpoint: "https://api.example.com",
+      apiKey: "sk-provider-key",
+      usageEnabled: true,
+      usageScript: btoa("console.log('usage');"),
+      usageApiKey: "sk-usage-key",
+      usageBaseUrl: "https://usage.example.com",
+      usageAccessToken: "pat-secret-token",
+      usageUserId: "user-12345",
+      usageAutoInterval: 60,
+    };
+    queuePendingDeeplink(request);
     render(<DeepLinkImportDialog />, { wrapper: Wrapper });
 
     act(() => {
-      emitTauriEvent("deeplink-import", {
-        version: "v1",
-        resource: "provider",
-        app: "claude",
-        name: "Test Provider",
-        homepage: "https://example.com",
-        endpoint: "https://api.example.com",
-        apiKey: "sk-provider-key",
-        usageEnabled: true,
-        usageScript: btoa("console.log('usage');"),
-        usageApiKey: "sk-usage-key",
-        usageBaseUrl: "https://usage.example.com",
-        usageAccessToken: "pat-secret-token",
-        usageUserId: "user-12345",
-        usageAutoInterval: 60,
-      });
+      emitTauriEvent("deeplink-import", request);
     });
 
     await waitFor(() => {
@@ -68,20 +103,22 @@ describe("DeepLinkImportDialog", () => {
     // 后端 build_provider_meta 在任一 usage 字段存在时即持久化（含 access_token
     // 与 user_id）。若对话框只在 usageScript 存在时开门，这条链接会把凭据静默
     // 写进供应商配置。撤销门槛 widening（恢复只按 usageScript 开门）本测试即失败。
+    const request: DeepLinkImportRequest = {
+      version: "v1",
+      resource: "provider",
+      app: "claude",
+      name: "Token Only Provider",
+      homepage: "https://example.com",
+      endpoint: "https://api.example.com",
+      apiKey: "sk-provider-key",
+      usageAccessToken: "pat-secret-token",
+      usageUserId: "user-12345",
+    };
+    queuePendingDeeplink(request);
     render(<DeepLinkImportDialog />, { wrapper: Wrapper });
 
     act(() => {
-      emitTauriEvent("deeplink-import", {
-        version: "v1",
-        resource: "provider",
-        app: "claude",
-        name: "Token Only Provider",
-        homepage: "https://example.com",
-        endpoint: "https://api.example.com",
-        apiKey: "sk-provider-key",
-        usageAccessToken: "pat-secret-token",
-        usageUserId: "user-12345",
-      });
+      emitTauriEvent("deeplink-import", request);
     });
 
     await waitFor(() => {
